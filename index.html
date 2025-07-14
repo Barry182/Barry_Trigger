@@ -1,0 +1,229 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Анализ ходьбы</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+    <div id="container">
+        <div id="status">Проверка геолокации...</div>
+        <button id="startBtn">Начать анализ ходьбы</button>
+        <button id="loadBtn">Загрузить маршрут и посмотреть отчёт</button>
+        <div id="map"></div>
+        <div id="info"></div>
+        <div id="report"></div>
+        <input type="file" id="fileInput" accept=".json" style="display: none;">
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    <script>
+        let map, path, marker, watchId;
+        let isTracking = false;
+        let steps = 0, walkingTime = 0, standingTime = 0;
+        let lastPosition = null, lastMoveTime = null;
+        let stopPoints = [];
+        let log = { route: [], stops: [], steps: 0, walkingTime: 0, standingTime: 0 };
+        const STEP_DISTANCE = 0.7; // Средняя длина шага в метрах
+        const STOP_THRESHOLD = 10; // Секунды для определения остановки
+
+        const statusDiv = document.getElementById('status');
+        const startBtn = document.getElementById('startBtn');
+        const loadBtn = document.getElementById('loadBtn');
+        const infoDiv = document.getElementById('info');
+        const reportDiv = document.getElementById('report');
+        const fileInput = document.getElementById('fileInput');
+
+        // Проверка геолокации
+        if ("geolocation" in navigator) {
+            statusDiv.textContent = "Геолокация доступна";
+            statusDiv.style.color = "green";
+        } else {
+            statusDiv.textContent = "Геолокация недоступна";
+            statusDiv.style.color = "red";
+            startBtn.disabled = true;
+        }
+
+        // Инициализация карты
+        function initMap(lat = 55.7558, lng = 37.6173) {
+            map = L.map('map').setView([lat, lng], 15);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+            }).addTo(map);
+            path = L.polyline([], { color: 'blue' }).addTo(map);
+        }
+
+        // Расчет расстояния между двумя точками (в метрах)
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371e3;
+            const φ1 = lat1 * Math.PI / 180;
+            const φ2 = lat2 * Math.PI / 180;
+            const Δφ = (lat2 - lat1) * Math.PI / 180;
+            const Δλ = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+                      Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
+
+        // Обработка позиции
+        function handlePosition(position) {
+            const { latitude, longitude } = position.coords;
+            const currentTime = Date.now();
+
+            if (!map) initMap(latitude, longitude);
+            map.setView([latitude, longitude], 15);
+
+            if (marker) marker.setLatLng([latitude, longitude]);
+            else marker = L.marker([latitude, longitude]).addTo(map);
+
+            path.addLatLng([latitude, longitude]);
+            log.route.push({ lat: latitude, lng: longitude, timestamp: currentTime });
+
+            if (lastPosition) {
+                const distance = calculateDistance(lastPosition.latitude, lastPosition.longitude, latitude, longitude);
+                if (distance > 2) { // Движение
+                    steps += Math.round(distance / STEP_DISTANCE);
+                    if (lastMoveTime) walkingTime += (currentTime - lastMoveTime) / 1000;
+                    lastMoveTime = currentTime;
+                } else { // Остановка
+                    standingTime += (currentTime - (lastMoveTime || currentTime)) / 1000;
+                    if (standingTime >= STOP_THRESHOLD && !stopPoints.find(p => p.lat === latitude && p.lng === longitude)) {
+                        stopPoints.push({ lat: latitude, lng: longitude, duration: standingTime });
+                        L.circleMarker([latitude, longitude], { radius: 5, color: 'red' }).addTo(map)
+                            .bindPopup(`Остановка: ${Math.round(standingTime)} сек`);
+                    }
+                }
+            }
+
+            lastPosition = position.coords;
+            lastMoveTime = lastMoveTime || currentTime;
+            updateInfo();
+        }
+
+        // Обновление информации
+        function updateInfo() {
+            infoDiv.innerHTML = `
+                Шагов: ${steps}<br>
+                Время ходьбы: ${Math.round(walkingTime)} сек<br>
+                Время остановок: ${Math.round(standingTime)} сек<br>
+                Точки остановок: ${stopPoints.length}
+            `;
+        }
+
+        // Старт отслеживания
+        startBtn.addEventListener('click', () => {
+            if (!isTracking) {
+                map = null;
+                path = null;
+                marker = null;
+                steps = 0;
+                walkingTime = 0;
+                standingTime = 0;
+                lastPosition = null;
+                lastMoveTime = null;
+                stopPoints = [];
+                log = { route: [], stops: [], steps: 0, walkingTime: 0, standingTime: 0 };
+
+                map = document.getElementById('map').style.display = 'block';
+                watchId = navigator.geolocation.watchPosition(handlePosition, err => {
+                    statusDiv.textContent = `Ошибка геолокации: ${err.message}`;
+                    statusDiv.style.color = "red";
+                }, { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 });
+
+                startBtn.textContent = "Остановить анализ и скачать лог";
+                isTracking = true;
+            } else {
+                navigator.geolocation.clearWatch(watchId);
+                startBtn.textContent = "Начать анализ ходьбы";
+                isTracking = false;
+                log.steps = steps;
+                log.walkingTime = Math.round(walkingTime);
+                log.standingTime = Math.round(standingTime);
+                log.stops = stopPoints;
+                const blob = new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' });
+                saveAs(blob, 'walking_log.json');
+            }
+        });
+
+        // Загрузка и отображение отчета
+        loadBtn.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        fileInput.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const data = JSON.parse(e.target.result);
+                    reportDiv.style.display = 'block';
+                    reportDiv.innerHTML = `
+                        <h3>Отчёт по маршруту</h3>
+                        Шагов: ${data.steps}<br>
+                        Время ходьбы: ${data.walkingTime} сек<br>
+                        Время остановок: ${data.standingTime} сек<br>
+                        Точки остановок: ${data.stops.length}<br>
+                    `;
+
+                    if (data.route.length > 0) {
+                        if (!map) initMap(data.route[0].lat, data.route[0].lng);
+                        map.setView([data.route[0].lat, data.route[0].lng], 15);
+                        const routeCoords = data.route.map(p => [p.lat, p.lng]);
+                        L.polyline(routeCoords, { color: 'blue' }).addTo(map);
+                        data.stops.forEach(stop => {
+                            L.circleMarker([stop.lat, stop.lng], { radius: 5, color: 'red' })
+                                .addTo(map)
+                                .bindPopup(`Остановка: ${Math.round(stop.duration)} сек`);
+                        });
+                        map = document.getElementById('map').style.display = 'block';
+                    }
+                };
+                reader.readAsText(file);
+            }
+        });
+    </script>
+</body>
+</html>
