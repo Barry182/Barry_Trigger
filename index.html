@@ -1,0 +1,1145 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Mini Shooter Game</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.2/p5.min.js"></script>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+    #settingsButton {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      padding: 5px;
+      font-size: 12px;
+      background-color: #333;
+      color: white;
+      border: none;
+      cursor: pointer;
+      z-index: 10;
+      pointer-events: auto;
+    }
+    #settingsMenu {
+      position: absolute;
+      top: 40px;
+      right: 10px;
+      background-color: #333;
+      color: white;
+      padding: 10px;
+      z-index: 10;
+      display: none;
+      pointer-events: auto;
+    }
+    #settingsMenu select, #settingsMenu button {
+      margin: 5px;
+      padding: 5px;
+      background-color: #444;
+      color: white;
+      border: none;
+      cursor: pointer;
+    }
+    .weapon-button {
+      position: absolute;
+      padding: 10px;
+      font-size: 16px;
+      background-color: #444;
+      color: white;
+      border: none;
+      cursor: pointer;
+      z-index: 10;
+      pointer-events: auto;
+    }
+  </style>
+</head>
+<body>
+<button id="settingsButton">Настройки</button>
+<div id="settingsMenu">
+  <div>
+    <label>Управление: </label>
+    <button id="controlToggle">Переключить: Клик</button>
+  </div>
+  <div>
+    <label>Размер мини-карты: </label>
+    <select id="miniMapSize">
+      <option value="small">Маленькая</option>
+      <option value="medium" selected>Средняя</option>
+      <option value="large">Большая</option>
+    </select>
+  </div>
+  <div>
+    <label>Размер текста: </label>
+    <select id="textSize">
+      <option value="small">Маленький</option>
+      <option value="medium" selected>Средний</option>
+      <option value="large">Большой</option>
+    </select>
+  </div>
+</div>
+<script>
+let player, enemies, items, bullets, destructibles, gate;
+let map, currentLevel = 0, fogOfWar;
+let tileSize = 40;
+let mapWidth = 40, mapHeight = 30;
+let lastShot = 0, lastEnemyDamage = 0, lastFireDamage = 0, slowTimer = 0;
+let cameraX = 0, cameraY = 0;
+let rooms = [], secretRoom = null;
+let powerUpTimer = 0, invulnerabilityTimer = 0;
+let controlMode = 'click';
+let joystick = { active: false, x: 0, y: 0, startX: 0, startY: 0 };
+let choosingWeapon = false, weaponPromptItem = null;
+let weaponLevels = { pistol: 1, machinegun: 1, shotgun: 1 };
+let levelCompleted = false;
+let miniMapSize = 'medium';
+let textSizeSetting = 'medium';
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  initGame(currentLevel);
+  document.getElementById('settingsButton').addEventListener('click', toggleSettings);
+  document.getElementById('settingsButton').addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    toggleSettings();
+  });
+  document.getElementById('controlToggle').addEventListener('click', toggleControl);
+  document.getElementById('controlToggle').addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    toggleControl();
+  });
+  document.getElementById('miniMapSize').addEventListener('change', (e) => {
+    miniMapSize = e.target.value;
+  });
+  document.getElementById('textSize').addEventListener('change', (e) => {
+    textSizeSetting = e.target.value;
+  });
+}
+
+function toggleSettings() {
+  let menu = document.getElementById('settingsMenu');
+  menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+}
+
+function toggleControl() {
+  controlMode = controlMode === 'click' ? 'joystick' : controlMode === 'joystick' ? 'keyboard' : 'click';
+  document.getElementById('controlToggle').innerText = `Переключить: ${controlMode === 'click' ? 'Клик' : controlMode === 'joystick' ? 'Джойстик' : 'Клавиатура'}`;
+}
+
+function initGame(level) {
+  console.log(`Инициализация уровня ${level + 1}`);
+  map = generateMap(level);
+  fogOfWar = Array(mapHeight).fill().map(() => Array(mapWidth).fill(true));
+  let firstRoom = rooms[0];
+  let savedState = player ? { health: player.health, armor: player.armor, weapon: player.weapon } : null;
+  player = {
+    x: (firstRoom.x + firstRoom.w / 2) * tileSize,
+    y: (firstRoom.y + firstRoom.h / 2) * tileSize,
+    size: 20,
+    health: savedState ? savedState.health : 100,
+    armor: savedState ? savedState.armor : 0,
+    weapon: savedState ? savedState.weapon : 'pistol',
+    speed: 3,
+    damageMultiplier: 1,
+    pickupRadius: 7.5
+  };
+  enemies = [];
+  items = [];
+  bullets = [];
+  destructibles = []; // Гарантируем, что destructibles — массив
+  gate = null;
+  spawnEnemies(level);
+  spawnItems();
+  cameraX = player.x - width / 2;
+  cameraY = player.y - height / 2;
+  updateFogOfWar();
+  choosingWeapon = false;
+  weaponPromptItem = null;
+  levelCompleted = false;
+  removeWeaponButtons();
+  loop();
+}
+
+function generateMap(level) {
+  let m = [];
+  rooms = [];
+  destructibles = destructibles || []; // Защита от undefined
+  for (let i = 0; i < mapHeight; i++) {
+    m[i] = [];
+    for (let j = 0; j < mapWidth; j++) {
+      m[i][j] = 1;
+    }
+  }
+  let numRooms = constrain(5 + level, 5, 15);
+  for (let i = 0; i < numRooms; i++) {
+    let w = floor(random(5, 10));
+    let h = floor(random(5, 10));
+    let x = floor(random(2, mapWidth - w - 2));
+    let y = floor(random(2, mapHeight - h - 2));
+    let isLShaped = random() < 0.3;
+    let valid = true;
+    for (let room of rooms) {
+      if (x < room.x + room.w + 2 && x + w + 2 > room.x &&
+          y < room.y + room.h + 2 && y + h + 2 > room.y) {
+        valid = false;
+        break;
+      }
+    }
+    if (valid) {
+      rooms.push({x, y, w, h, isLShaped});
+      for (let r = y; r < y + h; r++) {
+        for (let c = x; c < x + w; c++) {
+          if (!isLShaped || (r < y + h/2 || c < x + w/2)) {
+            m[r][c] = 0;
+          }
+        }
+      }
+    }
+  }
+  if (random() < 0.1) {
+    let w = floor(random(4, 6));
+    let h = floor(random(4, 6));
+    let x = floor(random(2, mapWidth - w - 2));
+    let y = floor(random(2, mapHeight - h - 2));
+    let valid = true;
+    for (let room of rooms) {
+      if (x < room.x + room.w + 2 && x + w + 2 > room.x &&
+          y < room.y + room.h + 2 && y + h + 2 > room.y) {
+        valid = false;
+        break;
+      }
+    }
+    if (valid) {
+      secretRoom = {x, y, w, h};
+      for (let r = y; r < y + h; r++) {
+        for (let c = x; c < x + w; c++) {
+          m[r][c] = 0;
+        }
+      }
+      for (let r = y; r < y + h; r++) {
+        if (!destructibles.some(d => d && d.x === x-1 && d.y === r)) {
+          m[r][x-1] = 4;
+          destructibles.push({x: x-1, y: r, type: 'wall', health: 50});
+        }
+        if (!destructibles.some(d => d && d.x === x+w && d.y === r)) {
+          m[r][x+w] = 4;
+          destructibles.push({x: x+w, y: r, type: 'wall', health: 50});
+        }
+      }
+      for (let c = x; c < x + w; c++) {
+        if (!destructibles.some(d => d && d.x === c && d.y === y-1)) {
+          m[y-1][c] = 4;
+          destructibles.push({x: c, y: y-1, type: 'wall', health: 50});
+        }
+        if (!destructibles.some(d => d && d.x === c && d.y === y+h)) {
+          m[y+h][c] = 4;
+          destructibles.push({x: c, y: y+h, type: 'wall', health: 50});
+        }
+      }
+    }
+  }
+  let corridors = [];
+  for (let i = 1; i < rooms.length; i++) {
+    let roomA = rooms[i-1];
+    let roomB = rooms[i];
+    let cx1 = floor(roomA.x + roomA.w / 2);
+    let cy1 = floor(roomA.y + roomA.h / 2);
+    let cx2 = floor(roomB.x + roomB.w / 2);
+    let cy2 = floor(roomB.y + roomB.h / 2);
+    for (let x = min(cx1, cx2); x <= max(cx1, cx2); x++) {
+      m[cy1][x] = 0;
+      corridors.push({x: x, y: cy1});
+    }
+    for (let y = min(cy1, cy2); y <= max(cy1, cy2); y++) {
+      m[y][cx2] = 0;
+      corridors.push({x: cx2, y: y});
+    }
+  }
+  for (let i = 0; i < mapHeight; i++) {
+    for (let j = 0; j < mapWidth; j++) {
+      if (m[i][j] === 1 && random() < 0.2) {
+        m[i][j] = 2;
+      }
+    }
+  }
+  for (let i = 0; i < 5 + level; i++) {
+    let x, y, room;
+    let attempts = 0;
+    do {
+      room = rooms[floor(random(1, rooms.length))];
+      x = floor(room.x + random(room.w));
+      y = floor(room.y + random(room.h));
+      attempts++;
+      if (attempts > 50) break;
+    } while (m[y][x] !== 0 || corridors.some(c => c.x === x && c.y === y));
+    if (m[y][x] === 0) {
+      m[y][x] = random() < 0.33 ? 3 : random() < 0.5 ? 6 : 7;
+    }
+  }
+  if (!Array.isArray(destructibles)) {
+    console.warn(`destructibles не массив в generateMap, исправляем: ${destructibles}`);
+    destructibles = [];
+  }
+  destructibles = destructibles.filter(d => d && d.x !== undefined && d.y !== undefined);
+  console.log(`Создано разрушаемых объектов в generateMap: ${destructibles.length}`);
+  return m;
+}
+
+function spawnEnemies(level) {
+  enemies = enemies || []; // Защита от undefined
+  enemies = [];
+  if (level % 5 === 4) {
+    let largestRoom = rooms.reduce((max, r) => max.w * max.h > r.w * r.h ? max : r);
+    enemies.push({
+      x: (largestRoom.x + largestRoom.w / 2) * tileSize,
+      y: (largestRoom.y + largestRoom.h / 2) * tileSize,
+      health: 200 + 50 * level,
+      size: 40,
+      speed: 0.5,
+      type: 'boss',
+      shootDelay: 2000,
+      shootTimer: 0,
+      burstCount: 0
+    });
+  } else {
+    let numEnemies = 5 + level * 2;
+    for (let i = 0; i < numEnemies; i++) {
+      let x, y, room;
+      let attempts = 0;
+      do {
+        room = rooms[floor(random(1, rooms.length))];
+        x = (room.x + random(room.w)) * tileSize;
+        y = (room.y + random(room.h)) * tileSize;
+        attempts++;
+        if (attempts > 50) break;
+      } while (map[floor(y/tileSize)][floor(x/tileSize)] !== 0);
+      if (attempts <= 50) {
+        let type = random() < 0.33 ? 'sniper' : random() < 0.5 ? 'kamikaze' : 'tank';
+        enemies.push({
+          x, y,
+          health: type === 'tank' ? 100 + level * 20 : 50 + level * 10,
+          size: type === 'sniper' ? 15 : 20,
+          speed: type === 'kamikaze' ? 2 + level * 0.3 : type === 'sniper' ? 0.5 : 1 + level * 0.2,
+          type,
+          target: null,
+          shootDelay: type === 'sniper' ? 2000 : 0,
+          shootTimer: 0,
+          explosionRadius: type === 'kamikaze' ? 50 : 0
+        });
+      }
+    }
+  }
+  if (!Array.isArray(enemies)) {
+    console.warn(`enemies не массив в spawnEnemies, исправляем: ${enemies}`);
+    enemies = [];
+  }
+  enemies = enemies.filter(enemy => enemy && enemy.x !== undefined && enemy.y !== undefined);
+  console.log(`Создано врагов: ${enemies.length}`);
+}
+
+function spawnItems() {
+  items = items || []; // Защита от undefined
+  items = [];
+  destructibles = destructibles || []; // Защита от undefined
+  for (let i = 0; i < 3; i++) {
+    let x, y, room;
+    let attempts = 0;
+    do {
+      room = rooms[floor(random(rooms.length))];
+      x = (room.x + random(room.w)) * tileSize;
+      y = (room.y + random(room.h)) * tileSize;
+      attempts++;
+      if (attempts > 50) break;
+    } while (map[floor(y/tileSize)][floor(x/tileSize)] !== 0);
+    if (attempts <= 50) {
+      destructibles.push({x, y, type: 'barrel', health: 20, explosionRadius: 100});
+    }
+  }
+  if (!Array.isArray(destructibles)) {
+    console.warn(`destructibles не массив в spawnItems, исправляем: ${destructibles}`);
+    destructibles = [];
+  }
+  destructibles = destructibles.filter(d => d && d.x !== undefined && d.y !== undefined);
+  console.log(`Создано бочек: ${destructibles.filter(d => d.type === 'barrel').length}`);
+}
+
+function spawnGate() {
+  let maxAttempts = 50;
+  let attempts = 0;
+  let triedRooms = new Set();
+  let validPositionFound = false;
+  
+  while (attempts < maxAttempts && !validPositionFound && triedRooms.size < rooms.length) {
+    let roomIndex = floor(random(rooms.length));
+    while (triedRooms.has(roomIndex)) {
+      roomIndex = floor(random(rooms.length));
+    }
+    let room = rooms[roomIndex];
+    triedRooms.add(roomIndex);
+    let possiblePositions = [];
+    
+    for (let x = room.x; x < room.x + room.w; x++) {
+      if (x === room.x && (room.y === room.y || room.y === room.y + room.h - 1)) continue;
+      if (x === room.x + room.w - 1 && (room.y === room.y || room.y === room.y + room.h - 1)) continue;
+      if (map[room.y - 1][x] === 1 || map[room.y - 1][x] === 2) {
+        if (hasAdjacentFloor(x, room.y - 1)) {
+          possiblePositions.push({x: x, y: room.y - 1});
+        }
+      }
+      if (map[room.y + room.h][x] === 1 || map[room.y + room.h][x] === 2) {
+        if (hasAdjacentFloor(x, room.y + room.h)) {
+          possiblePositions.push({x: x, y: room.y + room.h});
+        }
+      }
+    }
+    for (let y = room.y; y < room.y + room.h; y++) {
+      if (y === room.y && (room.x === room.x || room.x === room.x + room.w - 1)) continue;
+      if (y === room.y + room.h - 1 && (room.x === room.x || room.x === room.x + room.w - 1)) continue;
+      if (map[y][room.x - 1] === 1 || map[y][room.x - 1] === 2) {
+        if (hasAdjacentFloor(room.x - 1, y)) {
+          possiblePositions.push({x: room.x - 1, y: y});
+        }
+      }
+      if (map[y][room.x + room.w] === 1 || map[y][room.x + room.w] === 2) {
+        if (hasAdjacentFloor(room.x + room.w, y)) {
+          possiblePositions.push({x: room.x + room.w, y: y});
+        }
+      }
+    }
+    
+    console.log(`Попытка ${attempts + 1}, Комната ${roomIndex}, Возможные позиции: ${possiblePositions.length}`);
+    
+    if (possiblePositions.length > 0) {
+      let pos = possiblePositions[floor(random(possiblePositions.length))];
+      gate = {x: pos.x * tileSize, y: pos.y * tileSize};
+      map[pos.y][pos.x] = 0;
+      validPositionFound = true;
+      console.log(`Ворота размещены: x=${gate.x}, y=${gate.y}, Комната ${roomIndex}`);
+    }
+    
+    attempts++;
+  }
+  
+  if (!validPositionFound) {
+    let room, x, y;
+    let centerAttempts = 0;
+    do {
+      room = rooms[floor(random(rooms.length))];
+      x = floor(room.x + room.w / 2);
+      y = floor(room.y + room.h / 2);
+      centerAttempts++;
+      if (centerAttempts > 50) {
+        console.warn(`Не удалось найти подходящее место для ворот после ${centerAttempts} попыток`);
+        break;
+      }
+    } while (!hasAdjacentFloor(x, y));
+    
+    gate = {x: x * tileSize, y: y * tileSize};
+    map[y][x] = 0;
+    console.log(`Ворота размещены в центре комнаты: x=${gate.x}, y=${gate.y}`);
+  }
+}
+
+function hasAdjacentFloor(x, y) {
+  return (
+    (x > 0 && map[y][x - 1] === 0) ||
+    (x < mapWidth - 1 && map[y][x + 1] === 0) ||
+    (y > 0 && map[y - 1][x] === 0) ||
+    (y < mapHeight - 1 && map[y + 1][x] === 0)
+  );
+}
+
+function hasLineOfSight(x1, y1, x2, y2) {
+  let steps = ceil(p5.Vector.dist(createVector(x1, y1), createVector(x2, y2)) / (tileSize / 2));
+  let dx = (x2 - x1) / steps;
+  let dy = (y2 - y1) / steps;
+  for (let i = 0; i <= steps; i++) {
+    let x = x1 + dx * i;
+    let y = y1 + dy * i;
+    let tileX = floor(x / tileSize);
+    let tileY = floor(y / tileSize);
+    if (tileX < 0 || tileX >= mapWidth || tileY < 0 || tileY >= mapHeight) {
+      return false;
+    }
+    let tile = map[tileY][tileX];
+    if (tile === 1 || tile === 2 || tile === 4) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getRandomPatrolPoint(enemy) {
+  let room = rooms[floor(random(rooms.length))];
+  let x, y;
+  let attempts = 0;
+  do {
+    x = (room.x + random(room.w)) * tileSize;
+    y = (room.y + random(room.h)) * tileSize;
+    attempts++;
+    if (attempts > 50) break;
+  } while (map[floor(y/tileSize)][floor(x/tileSize)] !== 0);
+  return {x, y};
+}
+
+function updateFogOfWar() {
+  let px = floor(player.x / tileSize);
+  let py = floor(player.y / tileSize);
+  for (let i = max(0, py - 5); i < min(mapHeight, py + 6); i++) {
+    for (let j = max(0, px - 5); j < min(mapWidth, px + 6); j++) {
+      if (p5.Vector.dist(createVector(px, py), createVector(j, i)) < 5) {
+        fogOfWar[i][j] = false;
+      }
+    }
+  }
+}
+
+function explode(x, y, radius, damage) {
+  let enemiesToRemove = [];
+  enemies = enemies || []; // Защита от undefined
+  for (let i = 0; i < enemies.length; i++) {
+    if (!enemies[i]) continue;
+    if (p5.Vector.dist(createVector(x, y), createVector(enemies[i].x, enemies[i].y)) < radius) {
+      enemies[i].health -= damage;
+      if (enemies[i].health <= 0) {
+        enemiesToRemove.push(i);
+      }
+    }
+  }
+  destructibles = destructibles || []; // Защита от undefined
+  if (p5.Vector.dist(createVector(x, y), createVector(player.x, player.y)) < radius && !invulnerabilityTimer) {
+    let absorbed = player.armor * 0.5;
+    let healthDamage = damage - absorbed;
+    if (healthDamage < 0) healthDamage = 0;
+    player.health -= healthDamage;
+    player.armor -= absorbed;
+    if (player.armor < 0) player.armor = 0;
+  }
+  for (let i = destructibles.length - 1; i >= 0; i--) {
+    if (!destructibles[i]) continue;
+    if (p5.Vector.dist(createVector(x, y), createVector(destructibles[i].x, destructibles[i].y)) < radius) {
+      destructibles[i].health -= damage;
+    }
+  }
+  items = items || []; // Защита от undefined
+  for (let i = enemiesToRemove.length - 1; i >= 0; i--) {
+    let j = enemiesToRemove[i];
+    if (j >= 0 && j < enemies.length && enemies[j]) {
+      console.log(`Враг ${j} убит в explode, создание предметов: health=${random() < 0.5 ? 'да' : 'нет'}, armor=${random() < 0.5 ? 'да' : 'нет'}, upgrade=${random() < 0.1 ? 'да' : 'нет'}`);
+      if (random() < 0.5) {
+        items.push({x: enemies[j].x, y: enemies[j].y, type: 'health', value: 20});
+      } else {
+        items.push({x: enemies[j].x, y: enemies[j].y, type: 'armor', value: 20});
+      }
+      if (random() < 0.1) {
+        items.push({x: enemies[j].x, y: enemies[j].y, type: 'upgrade', value: 1});
+      }
+      enemies.splice(j, 1);
+    }
+  }
+}
+
+function displayWeaponPrompt(item, index) {
+  if (!item) return;
+  choosingWeapon = true;
+  weaponPromptItem = { item, index };
+  noLoop();
+  let btnTake = document.createElement('button');
+  btnTake.className = 'weapon-button';
+  btnTake.style.left = `${width/2 - 120}px`;
+  btnTake.style.top = `${height/2 - 25}px`;
+  btnTake.innerText = `Взять ${item.value === 'machinegun' ? 'Пулемёт' : item.value === 'shotgun' ? 'Дробовик' : 'Лазер'}`;
+  btnTake.onclick = () => selectWeapon(true);
+  btnTake.ontouchstart = (e) => { e.preventDefault(); selectWeapon(true); };
+  document.body.appendChild(btnTake);
+  let btnDecline = document.createElement('button');
+  btnDecline.className = 'weapon-button';
+  btnDecline.style.left = `${width/2 + 20}px`;
+  btnDecline.style.top = `${height/2 - 25}px`;
+  btnDecline.innerText = 'Отказаться';
+  btnDecline.onclick = () => selectWeapon(false);
+  btnDecline.ontouchstart = (e) => { e.preventDefault(); selectWeapon(false); };
+  document.body.appendChild(btnDecline);
+}
+
+function selectWeapon(take) {
+  if (take && weaponPromptItem && weaponPromptItem.item) {
+    player.weapon = weaponPromptItem.item.value;
+  }
+  if (weaponPromptItem && weaponPromptItem.index >= 0 && weaponPromptItem.index < items.length) {
+    items.splice(weaponPromptItem.index, 1);
+  }
+  removeWeaponButtons();
+  choosingWeapon = false;
+  weaponPromptItem = null;
+  loop();
+}
+
+function removeWeaponButtons() {
+  let buttons = document.getElementsByClassName('weapon-button');
+  while (buttons.length > 0) {
+    buttons[0].remove();
+  }
+}
+
+function draw() {
+  console.log(`Рисование: Уровень ${currentLevel + 1}, Враги: ${enemies.length}, Выбор оружия: ${choosingWeapon}, Уровень завершён: ${levelCompleted}, Ворота: ${gate ? `x=${gate.x}, y=${gate.y}` : 'нет'}`);
+  console.log(`Игрок: (${player.x}, ${player.y})`);
+  console.log(`Разрушаемые объекты: ${Array.isArray(destructibles) ? destructibles.length : 'undefined'}`);
+  background(50);
+  cameraX = player.x - width / 2;
+  cameraY = player.y - height / 2;
+  cameraX = constrain(cameraX, 0, mapWidth * tileSize - width);
+  cameraY = constrain(cameraY, 0, mapHeight * tileSize - height);
+  push();
+  translate(-cameraX, -cameraY);
+  for (let i = 0; i < mapHeight; i++) {
+    for (let j = 0; j < mapWidth; j++) {
+      if (fogOfWar[i][j]) {
+        fill(0);
+      } else if (map[i][j] === 1) {
+        fill(100);
+      } else if (map[i][j] === 2) {
+        fill(150, 100, 100);
+      } else if (map[i][j] === 3) {
+        fill(200, 0, 200);
+      } else if (map[i][j] === 4) {
+        fill(139, 69, 19, 200 + 55 * sin(millis() / 200));
+      } else if (map[i][j] === 6) {
+        fill(255, 165, 0);
+      } else if (map[i][j] === 7) {
+        fill(0, 0, 255);
+      } else {
+        fill(200);
+      }
+      rect(j * tileSize, i * tileSize, tileSize, tileSize);
+    }
+  }
+  destructibles = destructibles || []; // Защита от undefined
+  for (let d of destructibles) {
+    if (!d || d.x === undefined || d.y === undefined || fogOfWar[floor(d.y/tileSize)][floor(d.x/tileSize)]) continue;
+    console.log(`Отрисовка разрушаемого объекта: type=${d.type}, x=${d.x}, y=${d.y}`);
+    if (d.type === 'wall') {
+      fill(139, 69, 19, 200 + 55 * sin(millis() / 200));
+      rect(d.x * tileSize, d.y * tileSize, tileSize, tileSize);
+    } else if (d.type === 'barrel') {
+      fill(255, 0, 0);
+      ellipse(d.x, d.y, 20);
+      fill(255, 255, 0);
+      ellipse(d.x, d.y, 10);
+    }
+  }
+  items = items || []; // Защита от undefined
+  for (let item of items) {
+    if (!item || fogOfWar[floor(item.y/tileSize)][floor(item.x/tileSize)]) continue;
+    if (item.type === 'health') fill(0, 255, 0);
+    else if (item.type === 'armor') fill(0, 0, 255);
+    else if (item.type === 'upgrade') fill(0, 255, 255);
+    ellipse(item.x, item.y, 15);
+    fill(255);
+    textSize(12);
+    textAlign(CENTER);
+    let label = item.type === 'health' ? 'Здоровье' :
+                item.type === 'armor' ? 'Броня' :
+                item.type === 'upgrade' ? 'Улучшение' : '';
+    text(label, item.x, item.y - 15);
+  }
+  enemies = enemies || []; // Защита от undefined
+  for (let enemy of enemies) {
+    if (!enemy || fogOfWar[floor(enemy.y/tileSize)][floor(enemy.x/tileSize)]) continue;
+    if (enemy.type === 'sniper') fill(128, 0, 128);
+    else if (enemy.type === 'kamikaze') fill(255, 165, 0);
+    else if (enemy.type === 'tank') fill(139, 0, 0);
+    else if (enemy.type === 'boss') fill(0, 0, 139);
+    else fill(255, 0, 0);
+    ellipse(enemy.x, enemy.y, enemy.size);
+  }
+  if (gate && gate.x !== undefined && gate.y !== undefined && !fogOfWar[floor(gate.y/tileSize)][floor(gate.x/tileSize)]) {
+    fill(0, 255, 0);
+    rect(gate.x, gate.y, tileSize, tileSize);
+    fill(255);
+    textSize(12);
+    textAlign(CENTER);
+    text('Ворота', gate.x + tileSize / 2, gate.y - 15);
+  }
+  fill(0, 255, 255);
+  if (invulnerabilityTimer) fill(255, 215, 0, 200 + 55 * sin(millis() / 200));
+  ellipse(player.x, player.y, player.size);
+  bullets = bullets || []; // Защита от undefined
+  for (let bullet of bullets) {
+    if (!bullet) continue;
+    fill(bullet.from === 'player' ? 255 : 128, bullet.from === 'player' ? 255 : 0, 0);
+    ellipse(bullet.x, bullet.y, 5);
+  }
+  if (controlMode === 'joystick' && joystick.active) {
+    fill(255, 255, 255, 100);
+    ellipse(joystick.startX, joystick.startY, 60);
+    fill(255, 255, 255, 200);
+    ellipse(joystick.x, joystick.y, 20);
+  }
+  pop();
+  let miniMapWidth = miniMapSize === 'small' ? 100 : miniMapSize === 'medium' ? 150 : 200;
+  let miniMapHeight = miniMapSize === 'small' ? 67 : miniMapSize === 'medium' ? 100 : 133;
+  let miniTileSize = min(miniMapWidth / mapWidth, miniMapHeight / mapHeight);
+  push();
+  translate(width - miniMapWidth - 10, height - miniMapHeight - 10);
+  fill(0, 100);
+  rect(0, 0, miniMapWidth, miniMapHeight);
+  for (let i = 0; i < mapHeight; i++) {
+    for (let j = 0; j < mapWidth; j++) {
+      if (fogOfWar[i][j]) {
+        fill(0);
+      } else if (map[i][j] === 1 || map[i][j] === 2 || map[i][j] === 4) {
+        fill(100);
+      } else if (map[i][j] === 3 || map[i][j] === 6 || map[i][j] === 7) {
+        fill(200, 0, 200);
+      } else {
+        fill(200);
+      }
+      rect(j * miniTileSize, i * miniTileSize, miniTileSize, miniTileSize);
+    }
+  }
+  for (let item of items) {
+    if (!item || fogOfWar[floor(item.y/tileSize)][floor(item.x/tileSize)]) continue;
+    if (item.type === 'health') fill(0, 255, 0);
+    else if (item.type === 'armor') fill(0, 0, 255);
+    else if (item.type === 'upgrade') fill(0, 255, 255);
+    ellipse((item.x/tileSize) * miniTileSize, (item.y/tileSize) * miniTileSize, 3);
+  }
+  for (let enemy of enemies) {
+    if (!enemy || fogOfWar[floor(enemy.y/tileSize)][floor(enemy.x/tileSize)]) continue;
+    fill(enemy.type === 'sniper' ? 128 : enemy.type === 'kamikaze' ? 255 : enemy.type === 'tank' ? 139 : enemy.type === 'boss' ? 0 : 255,
+         enemy.type === 'sniper' ? 0 : enemy.type === 'kamikaze' ? 165 : 0,
+         enemy.type === 'sniper' ? 128 : enemy.type === 'boss' ? 139 : 0);
+    ellipse((enemy.x/tileSize) * miniTileSize, (enemy.y/tileSize) * miniTileSize, 3);
+  }
+  if (gate && gate.x !== undefined && gate.y !== undefined && !fogOfWar[floor(gate.y/tileSize)][floor(gate.x/tileSize)]) {
+    fill(0, 255, 0);
+    rect((gate.x/tileSize) * miniTileSize, (gate.y/tileSize) * miniTileSize, miniTileSize, miniTileSize);
+  }
+  fill(0, 255, 255);
+  ellipse((player.x/tileSize) * miniTileSize, (player.y/tileSize) * miniTileSize, 3);
+  pop();
+  let statTextSize = textSizeSetting === 'small' ? 8 : textSizeSetting === 'medium' ? 12 : 16;
+  let statBoxHeight = textSizeSetting === 'small' ? 130 : textSizeSetting === 'medium' ? 180 : 230;
+  let statLineSpacing = textSizeSetting === 'small' ? 10 : textSizeSetting === 'medium' ? 15 : 20;
+  push();
+  fill(0, 0, 0, 150);
+  rect(0, 0, 120, statBoxHeight);
+  fill(255);
+  textSize(statTextSize);
+  textAlign(LEFT);
+  let bulletSpeed = player.weapon === 'machinegun' ? 7 : 5;
+  let fireRate = player.weapon === 'pistol' ? 2 : player.weapon === 'machinegun' ? 10 / (1 + 0.2 * (weaponLevels.machinegun - 1)) : player.weapon === 'shotgun' ? 1.25 : 2;
+  let bulletDamage = player.weapon === 'pistol' ? 20 + 5 * (weaponLevels.pistol - 1) : player.weapon === 'machinegun' ? 10 : player.weapon === 'shotgun' ? 15 : 40;
+  let currentSpeed = slowTimer && millis() - slowTimer < 5000 ? player.speed * 0.5 : player.speed;
+  text(`Здоровье: ${floor(player.health)}`, 5, statLineSpacing);
+  text(`Броня: ${floor(player.armor)}`, 5, statLineSpacing * 2);
+  text(`Оружие: ${player.weapon === 'pistol' ? 'Пистолет' : player.weapon === 'machinegun' ? 'Пулемёт' : player.weapon === 'shotgun' ? 'Дробовик' : 'Лазер'} Ур. ${weaponLevels[player.weapon] || 1}`, 5, statLineSpacing * 3);
+  text(`Уровень: ${currentLevel + 1}`, 5, statLineSpacing * 4);
+  text(`Скорость: ${currentSpeed.toFixed(2)}`, 5, statLineSpacing * 5);
+  text(`Скорость пули: ${bulletSpeed.toFixed(2)}`, 5, statLineSpacing * 6);
+  text(`Частота стрельбы: ${fireRate.toFixed(2)} /с`, 5, statLineSpacing * 7);
+  text(`Урон пули: ${bulletDamage}`, 5, statLineSpacing * 8);
+  text(`Радиус сбора: ${player.pickupRadius.toFixed(2)}`, 5, statLineSpacing * 9);
+  text(`Множитель урона: ${player.damageMultiplier.toFixed(2)}`, 5, statLineSpacing * 10);
+  text(`Эффекты: ${[
+    powerUpTimer ? 'Усиление' : '',
+    invulnerabilityTimer ? 'Неуязвимость' : ''
+  ].filter(e => e).join(', ') || 'Нет'}`, 5, statLineSpacing * 11);
+  pop();
+  if (controlMode === 'click' && player.target) {
+    let dx = player.target.x - player.x;
+    let dy = player.target.y - player.y;
+    let distance = p5.Vector.dist(createVector(player.x, player.y), createVector(player.target.x, player.target.y));
+    if (distance > 5) {
+      let angle = atan2(dy, dx);
+      let newX = player.x + cos(angle) * currentSpeed;
+      let newY = player.y + sin(angle) * currentSpeed;
+      if (map[floor(newY/tileSize)][floor(newX/tileSize)] === 0) {
+        player.x = newX;
+        player.y = newY;
+      } else {
+        player.target = null;
+      }
+    } else {
+      player.target = null;
+    }
+  } else if (controlMode === 'joystick' && joystick.active) {
+    let dx = joystick.x - joystick.startX;
+    let dy = joystick.y - joystick.startY;
+    let dist = p5.Vector.dist(createVector(joystick.startX, joystick.startY), createVector(joystick.x, joystick.y));
+    if (dist > 10) {
+      let angle = atan2(dy, dx);
+      let speed = min(dist / 30, 1) * currentSpeed;
+      let vx = cos(angle) * speed;
+      let vy = sin(angle) * speed;
+      let newX = player.x + vx;
+      if (map[floor(player.y/tileSize)][floor(newX/tileSize)] === 0) {
+        player.x = newX;
+      }
+      let newY = player.y + vy;
+      if (map[floor(newY/tileSize)][floor(player.x/tileSize)] === 0) {
+        player.y = newY;
+      }
+    }
+  } else if (controlMode === 'keyboard') {
+    let vx = 0, vy = 0;
+    if (keyIsDown(LEFT_ARROW) || keyIsDown(65)) vx -= currentSpeed;
+    if (keyIsDown(RIGHT_ARROW) || keyIsDown(68)) vx += currentSpeed;
+    if (keyIsDown(UP_ARROW) || keyIsDown(87)) vy -= currentSpeed;
+    if (keyIsDown(DOWN_ARROW) || keyIsDown(83)) vy += currentSpeed;
+    if (vx !== 0 || vy !== 0) {
+      let angle = atan2(vy, vx);
+      let speed = currentSpeed / (abs(vx) + abs(vy) > currentSpeed ? sqrt(2) : 1);
+      let newX = player.x + cos(angle) * speed * (abs(vx) !== 0 ? 1 : 0);
+      let newY = player.y + sin(angle) * speed * (abs(vy) !== 0 ? 1 : 0);
+      if (map[floor(newY/tileSize)][floor(newX/tileSize)] === 0) {
+        player.x = newX;
+        player.y = newY;
+      }
+    }
+  }
+  enemies = enemies || []; // Защита от undefined
+  let enemiesToRemove = [];
+  for (let i = 0; i < enemies.length; i++) {
+    let enemy = enemies[i];
+    if (!enemy) continue;
+    let dx = player.x - enemy.x;
+    let dy = player.y - enemy.y;
+    let distance = p5.Vector.dist(createVector(enemy.x, enemy.y), createVector(player.x, player.y));
+    if (enemy.type === 'tank') {
+      console.log(`Танк движется: Расстояние ${distance}, Линия видимости: ${hasLineOfSight(enemy.x, enemy.y, player.x, player.y)}`);
+    }
+    if (enemy.type === 'kamikaze' && distance < enemy.explosionRadius && !invulnerabilityTimer) {
+      explode(enemy.x, enemy.y, enemy.explosionRadius, 30);
+    } else if (distance < 200 && hasLineOfSight(enemy.x, enemy.y, player.x, player.y)) {
+      if (enemy.type === 'sniper' || enemy.type === 'boss') {
+        if (millis() - enemy.shootTimer > enemy.shootDelay) {
+          let angle = atan2(player.y - enemy.y, player.x - enemy.x);
+          if (enemy.type === 'boss' && enemy.burstCount < 3) {
+            bullets.push({x: enemy.x, y: enemy.y, vx: cos(angle) * 5, vy: sin(angle) * 5, damage: 20, from: 'enemy'});
+            enemy.burstCount++;
+            enemy.shootTimer = millis() - (enemy.shootDelay - 200);
+          } else {
+            bullets.push({x: enemy.x, y: enemy.y, vx: cos(angle) * 5, vy: sin(angle) * 5, damage: enemy.type === 'sniper' ? 30 : 20, from: 'enemy'});
+            enemy.shootTimer = millis();
+            enemy.burstCount = 0;
+          }
+        }
+      }
+      if (enemy.type === 'kamikaze' || enemy.type === 'tank') {
+        let angle = atan2(dy, dx);
+        let newX = enemy.x + cos(angle) * enemy.speed;
+        let newY = enemy.y + sin(angle) * enemy.speed;
+        if (map[floor(newY/tileSize)][floor(newX/tileSize)] === 0) {
+          enemy.x = newX;
+          enemy.y = newY;
+        }
+      }
+      enemy.target = null;
+    } else {
+      if (!enemy.target || p5.Vector.dist(createVector(enemy.x, enemy.y), createVector(enemy.target.x, enemy.target.y)) < 5) {
+        enemy.target = getRandomPatrolPoint(enemy);
+      }
+      let dx = enemy.target.x - enemy.x;
+      let dy = enemy.target.y - enemy.y;
+      let distToTarget = p5.Vector.dist(createVector(enemy.x, enemy.y), createVector(enemy.target.x, enemy.target.y));
+      if (distToTarget > 5) {
+        let angle = atan2(dy, dx);
+        let newX = enemy.x + cos(angle) * enemy.speed * 0.5;
+        let newY = enemy.y + sin(angle) * enemy.speed * 0.5;
+        if (map[floor(newY/tileSize)][floor(newX/tileSize)] === 0) {
+          enemy.x = newX;
+          enemy.y = newY;
+        } else {
+          enemy.target = null;
+        }
+      }
+    }
+    if (distance < (player.size + enemy.size) / 2 && millis() - lastEnemyDamage > 1000 && !invulnerabilityTimer) {
+      let damage = enemy.type === 'tank' ? 20 : 10;
+      let absorbed = player.armor * 0.5;
+      let healthDamage = damage - absorbed;
+      if (healthDamage < 0) healthDamage = 0;
+      player.health -= healthDamage;
+      player.armor -= absorbed;
+      if (player.armor < 0) player.armor = 0;
+      lastEnemyDamage = millis();
+    }
+  }
+  let playerTileX = floor(player.x/tileSize);
+  let playerTileY = floor(player.y/tileSize);
+  if (map[playerTileY][playerTileX] === 3 && millis() - lastEnemyDamage > 1000 && !invulnerabilityTimer) {
+    let damage = 15;
+    let absorbed = player.armor * 0.5;
+    let healthDamage = damage - absorbed;
+    if (healthDamage < 0) healthDamage = 0;
+    player.health -= healthDamage;
+    player.armor -= absorbed;
+    if (player.armor < 0) player.armor = 0;
+    lastEnemyDamage = millis();
+  } else if (map[playerTileY][playerTileX] === 6 && millis() - lastFireDamage > 1000 && !invulnerabilityTimer) {
+    let damage = 5;
+    let absorbed = player.armor * 0.5;
+    let healthDamage = damage - absorbed;
+    if (healthDamage < 0) healthDamage = 0;
+    player.health -= healthDamage;
+    player.armor -= absorbed;
+    if (player.armor < 0) player.armor = 0;
+    lastFireDamage = millis();
+  } else if (map[playerTileY][playerTileX] === 7 && !slowTimer && !invulnerabilityTimer) {
+    slowTimer = millis();
+  }
+  let closestEnemy = null, minDist = Infinity;
+  for (let enemy of enemies) {
+    if (!enemy) continue;
+    let d = p5.Vector.dist(createVector(player.x, player.y), createVector(enemy.x, enemy.y));
+    if (d < minDist && d < 200 && hasLineOfSight(player.x, player.y, enemy.x, enemy.y)) {
+      minDist = d;
+      closestEnemy = enemy;
+    }
+  }
+  if (closestEnemy && millis() - lastShot > (player.weapon === 'pistol' ? 500 : player.weapon === 'machinegun' ? 100 / (1 + 0.2 * (weaponLevels.machinegun - 1)) : 800)) {
+    shoot(closestEnemy);
+    lastShot = millis();
+  }
+  bullets = bullets || []; // Защита от undefined
+  let enemiesToRemoveFromBullets = [];
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    let bullet = bullets[i];
+    if (!bullet) continue;
+    bullet.x += bullet.vx;
+    bullet.y += bullet.vy;
+    let tileX = floor(bullet.x/tileSize);
+    let tileY = floor(bullet.y/tileSize);
+    if (tileX >= 0 && tileX < mapWidth && tileY >= 0 && tileY < mapHeight) {
+      if (map[tileY][tileX] === 1 || map[tileY][tileX] === 2) {
+        bullets.splice(i, 1);
+        continue;
+      }
+      if (map[tileY][tileX] === 4) {
+        for (let d of destructibles) {
+          if (!d || d.type !== 'wall' || d.x !== tileX || d.y !== tileY) continue;
+          d.health -= bullet.damage;
+          bullets.splice(i, 1);
+          break;
+        }
+        continue;
+      }
+    }
+    if (bullet.x < 0 || bullet.x > mapWidth * tileSize || bullet.y < 0 || bullet.y > mapHeight * tileSize) {
+      bullets.splice(i, 1);
+      continue;
+    }
+    for (let j = enemies.length - 1; j >= 0 && bullet.from === 'player'; j--) {
+      if (!enemies[j]) continue;
+      if (p5.Vector.dist(createVector(bullet.x, bullet.y), createVector(enemies[j].x, enemies[j].y)) < enemies[j].size/2) {
+        enemies[j].health -= bullet.damage * player.damageMultiplier;
+        bullets.splice(i, 1);
+        if (enemies[j].health <= 0) {
+          enemiesToRemoveFromBullets.push(j);
+        }
+        break;
+      }
+    }
+    if (bullet.from === 'enemy' && p5.Vector.dist(createVector(bullet.x, bullet.y), createVector(player.x, player.y)) < player.size/2 && !invulnerabilityTimer) {
+      let damage = bullet.damage;
+      let absorbed = player.armor * 0.5;
+      let healthDamage = damage - absorbed;
+      if (healthDamage < 0) healthDamage = 0;
+      player.health -= healthDamage;
+      player.armor -= absorbed;
+      if (player.armor < 0) player.armor = 0;
+      bullets.splice(i, 1);
+    }
+  }
+  for (let i = enemiesToRemoveFromBullets.length - 1; i >= 0; i--) {
+    let j = enemiesToRemoveFromBullets[i];
+    if (j >= 0 && j < enemies.length && enemies[j]) {
+      console.log(`Враг ${j} убит пулей, создание предметов: health=${random() < 0.5 ? 'да' : 'нет'}, armor=${random() < 0.5 ? 'да' : 'нет'}, upgrade=${random() < 0.1 ? 'да' : 'нет'}`);
+      if (random() < 0.5) {
+        items.push({x: enemies[j].x, y: enemies[j].y, type: 'health', value: 20});
+      } else {
+        items.push({x: enemies[j].x, y: enemies[j].y, type: 'armor', value: 20});
+      }
+      if (random() < 0.1) {
+        items.push({x: enemies[j].x, y: enemies[j].y, type: 'upgrade', value: 1});
+      }
+      enemies.splice(j, 1);
+    }
+  }
+  destructibles = destructibles || []; // Защита от undefined
+  for (let i = destructibles.length - 1; i >= 0; i--) {
+    if (!destructibles[i] || destructibles[i].health <= 0) {
+      if (destructibles[i] && destructibles[i].type === 'wall') {
+        map[destructibles[i].y][destructibles[i].x] = 0;
+      } else if (destructibles[i] && destructibles[i].type === 'barrel') {
+        explode(destructibles[i].x, destructibles[i].y, destructibles[i].explosionRadius, 50);
+      }
+      destructibles.splice(i, 1);
+    }
+  }
+  if (!Array.isArray(destructibles)) {
+    console.warn(`destructibles не массив в draw, исправляем: ${destructibles}`);
+    destructibles = [];
+  }
+  destructibles = destructibles.filter(d => d && d.x !== undefined && d.y !== undefined);
+  items = items || []; // Защита от undefined
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (!items[i]) continue;
+    if (p5.Vector.dist(createVector(player.x, player.y), createVector(items[i].x, items[i].y)) < player.size/2 + player.pickupRadius) {
+      console.log(`Сбор предмета ${i}: type=${items[i].type}, x=${items[i].x}, y=${items[i].y}, расстояние=${p5.Vector.dist(createVector(player.x, player.y), createVector(items[i].x, items[i].y))}`);
+      if (items[i].type === 'health') {
+        player.health = min(100, player.health + items[i].value);
+        items.splice(i, 1);
+      } else if (items[i].type === 'armor') {
+        player.armor = min(100, player.armor + items[i].value);
+        items.splice(i, 1);
+      } else if (items[i].type === 'upgrade') {
+        if (player.weapon === 'pistol') weaponLevels.pistol++;
+        else if (player.weapon === 'machinegun') weaponLevels.machinegun++;
+        else if (player.weapon === 'shotgun') weaponLevels.shotgun++;
+        items.splice(i, 1);
+      }
+    }
+  }
+  if (enemies.length === 0 && !levelCompleted && !choosingWeapon && !gate) {
+    spawnGate();
+    levelCompleted = true;
+  }
+  if (gate && gate.x !== undefined && gate.y !== undefined && enemies.length === 0 && !choosingWeapon) {
+    let gateTileX = floor(gate.x / tileSize);
+    let gateTileY = floor(gate.y / tileSize);
+    let playerTileX = floor(player.x / tileSize);
+    let playerTileY = floor(player.y / tileSize);
+    if (playerTileX === gateTileX && playerTileY === gateTileY) {
+      console.log(`Игрок на клетке ворот: Игрок=(${playerTileX}, ${playerTileY}), Ворота=(${gateTileX}, ${gateTileY})`);
+      currentLevel++;
+      initGame(currentLevel);
+    }
+  }
+  if (powerUpTimer && millis() - powerUpTimer > 10000) {
+    player.damageMultiplier = 1;
+    powerUpTimer = 0;
+  }
+  if (invulnerabilityTimer && millis() - invulnerabilityTimer > 5000) {
+    invulnerabilityTimer = 0;
+  }
+  updateFogOfWar();
+  if (player.health <= 0) {
+    textSize(32);
+    fill(255, 0, 0);
+    textAlign(CENTER);
+    text("Игра окончена", width/2, height/2);
+    noLoop();
+  }
+}
+
+function shoot(enemy) {
+  if (!enemy) return;
+  let angle = atan2(player.y - enemy.y, player.x - enemy.x);
+  let damage = player.weapon === 'pistol' ? 20 + 5 * (weaponLevels.pistol - 1) : player.weapon === 'machinegun' ? 10 : player.weapon === 'shotgun' ? 15 : 40;
+  bullets = bullets || []; // Защита от undefined
+  if (player.weapon === 'pistol' || player.weapon === 'laser') {
+    bullets.push({x: player.x, y: player.y, vx: -cos(angle) * 5, vy: -sin(angle) * 5, damage, from: 'player'});
+  } else if (player.weapon === 'machinegun') {
+    bullets.push({x: player.x, y: player.y, vx: -cos(angle) * 7, vy: -sin(angle) * 7, damage, from: 'player'});
+  } else if (player.weapon === 'shotgun') {
+    let bulletCount = 3 + (weaponLevels.shotgun - 1);
+    for (let i = -floor(bulletCount/2); i <= floor(bulletCount/2); i++) {
+      let spread = angle + i * (0.2 - 0.05 * (weaponLevels.shotgun - 1));
+      bullets.push({x: player.x, y: player.y, vx: -cos(spread) * 5, vy: -sin(spread) * 5, damage, from: 'player'});
+    }
+  }
+}
+
+function mousePressed() {
+  if (controlMode === 'click' && !choosingWeapon) {
+    let tx = mouseX + cameraX, ty = mouseY + cameraY;
+    if (map[floor(ty/tileSize)][floor(tx/tileSize)] === 0) {
+      player.target = {x: tx, y: ty};
+    }
+  } else if (controlMode === 'joystick' && !choosingWeapon) {
+    joystick.active = true;
+    joystick.startX = player.x - cameraX;
+    joystick.startY = player.y - cameraY;
+    joystick.x = joystick.startX;
+    joystick.y = joystick.startY;
+  }
+}
+
+function mouseDragged() {
+  if (controlMode === 'joystick' && joystick.active && !choosingWeapon) {
+    joystick.x = mouseX;
+    joystick.y = mouseY;
+    let dist = p5.Vector.dist(createVector(joystick.startX, joystick.startY), createVector(joystick.x, joystick.y));
+    if (dist > 30) {
+      let angle = atan2(joystick.y - joystick.startY, joystick.x - joystick.startX);
+      joystick.x = joystick.startX + cos(angle) * 30;
+      joystick.y = joystick.startY + sin(angle) * 30;
+    }
+  }
+}
+
+function mouseReleased() {
+  if (controlMode === 'joystick' && !choosingWeapon) {
+    joystick.active = false;
+  }
+}
+
+function touchStarted() {
+  mousePressed();
+  return false;
+}
+
+function touchMoved() {
+  mouseDragged();
+  return false;
+}
+
+function touchEnded() {
+  mouseReleased();
+  return false;
+}
+</script>
+</body>
+</html>
